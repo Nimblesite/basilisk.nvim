@@ -7,7 +7,8 @@
 --- 4. /usr/local/bin/basilisk
 --- 5. /opt/homebrew/bin/basilisk
 --- 6. Fall back to OS PATH search
---- 7. Auto-download from GitHub releases (fallback)
+--- 7. Plugin-managed cache (a binary an earlier session downloaded)
+--- 8. Auto-download from GitHub releases (fallback)
 
 local log = require("basilisk.log")
 
@@ -18,6 +19,16 @@ local GITHUB_REPO = "Nimblesite/Basilisk"
 
 --- GitHub API URL for latest release.
 local RELEASES_API = "https://api.github.com/repos/" .. GITHUB_REPO .. "/releases/latest"
+
+--- GitHub API URL for the full release list (newest first), used to skip past a
+--- newest-release that shipped no binaries. See [NVIM-BINARY-UPGRADE-ASSETS].
+local RELEASES_LIST_API = "https://api.github.com/repos/" .. GITHUB_REPO .. "/releases"
+
+--- Repo URL, the source of truth for every from-source install hint. Exported
+--- so update.lua composes its advice from the same string instead of
+--- hand-repeating the URL.
+local GITHUB_URL = "https://github.com/" .. GITHUB_REPO
+M.GITHUB_URL = GITHUB_URL
 
 --- Directory where downloaded binaries are cached.
 ---@return string
@@ -30,6 +41,30 @@ end
 ---@return boolean
 local function is_executable(path)
   return vim.fn.executable(path) == 1
+end
+
+--- The newest plugin-managed install already on disk, or nil.
+---
+--- Implements [NVIM-BINARY-UPGRADE-MANAGED-DISCOVERY]. Downloads land in a
+--- version-scoped directory (`<data>/basilisk/<tag>/`), so the path cannot be
+--- named without knowing the tag. Scanning for it keeps a managed install
+--- resolvable from disk alone — deriving the tag from GitHub instead makes an
+--- offline or rate-limited session unable to see its own binary (issue #370).
+---@return string?
+local function newest_managed()
+  local root = download_dir()
+  local best_path, best_version
+  for name, kind in vim.fs.dir(root) do
+    if kind == "directory" then
+      for _, binary_name in ipairs({ "basilisk", "basilisk.exe" }) do
+        local candidate = root .. "/" .. name .. "/" .. binary_name
+        if is_executable(candidate) and (not best_version or M.is_newer_version(best_version, name)) then
+          best_path, best_version = candidate, name
+        end
+      end
+    end
+  end
+  return best_path
 end
 
 --- Check whether a configured binary path is usable.
@@ -114,28 +149,83 @@ function M.fetch_latest_release()
   return data
 end
 
+--- Every release, newest first (synchronous, via curl).
+---@return table[]? releases
+function M.fetch_releases()
+  local ok, result = pcall(vim.fn.system, {
+    "curl", "-sSL",
+    "-H", "Accept: application/vnd.github+json",
+    RELEASES_LIST_API,
+  })
+  if not ok or vim.v.shell_error ~= 0 then
+    return nil
+  end
+  local decode_ok, data = pcall(vim.json.decode, result)
+  if not decode_ok or type(data) ~= "table" or type(data[1]) ~= "table" then
+    return nil
+  end
+  return data
+end
+
+--- The newest release that actually publishes `asset_name`.
+---
+--- Implements [NVIM-BINARY-UPGRADE-ASSETS]. The newest release is NOT always
+--- installable: a release is created from its tag the moment the tag is pushed,
+--- but its binaries are uploaded by a later job in the release workflow, so any
+--- gate that fails in between leaves a published release carrying ZERO assets.
+--- Resolving `releases/latest` and stopping there then hands the user a silent
+--- dead end — no binary, no error, nothing to act on (the #370 failure mode).
+--- Skipping to the newest release that DOES carry this platform's asset gives
+--- them a working checker instead, which is strictly better than nothing.
+---@param asset_name string
+---@return table? release, string? download_url
+function M.find_release_with_asset(asset_name)
+  local function match(release)
+    for _, asset in ipairs(release and release.assets or {}) do
+      if asset.name == asset_name then
+        return asset.browser_download_url
+      end
+    end
+    return nil
+  end
+
+  local latest = M.fetch_latest_release()
+  local url = match(latest)
+  if url then
+    return latest, url
+  end
+
+  for _, release in ipairs(M.fetch_releases() or {}) do
+    if not release.draft then
+      url = match(release)
+      if url then
+        log.warn(
+          "latest release %s publishes no %s — falling back to %s",
+          latest and latest.tag_name or "?",
+          asset_name,
+          release.tag_name
+        )
+        return release, url
+      end
+    end
+  end
+  return nil, nil
+end
+
 --- Download the basilisk binary from the latest GitHub release.
 --- Returns the path to the downloaded binary, or nil on failure.
 ---@return string? path, string? version
 function M.download()
-  local release = M.fetch_latest_release()
-  if not release then
-    return nil, nil
-  end
-
   local asset_name, is_windows = M.platform_asset_name()
   if not asset_name then
     return nil, nil
   end
 
-  local download_url
-  for _, asset in ipairs(release.assets or {}) do
-    if asset.name == asset_name then
-      download_url = asset.browser_download_url
-      break
-    end
-  end
-  if not download_url then
+  -- Not `fetch_latest_release()`: the newest release can carry zero assets when
+  -- its publish job never ran, and stopping there is a silent dead end.
+  -- [NVIM-BINARY-UPGRADE-ASSETS]
+  local release, download_url = M.find_release_with_asset(asset_name)
+  if not release or not download_url then
     return nil, nil
   end
 
@@ -200,7 +290,7 @@ function M.download()
   return nil, nil
 end
 
---- Locate an already-installed basilisk binary (cascade steps 1-6, no
+--- Locate an already-installed basilisk binary (cascade steps 1-7, no
 --- download). :BasiliskInstall uses this to decide whether anything is
 --- installed without side effects ([NVIM-BINARY-UPGRADE-INSTALL]).
 ---@param configured_path? string User-configured path from setup().
@@ -238,7 +328,8 @@ function M.locate(configured_path)
     return on_path
   end
 
-  return nil
+  -- 7. Plugin-managed cache — an install this plugin downloaded earlier.
+  return newest_managed()
 end
 
 --- Resolve the basilisk binary path using the LSP-SPEC cascade.
@@ -250,7 +341,7 @@ function M.resolve(configured_path)
     return located
   end
 
-  -- 7. Auto-download from GitHub releases.
+  -- 8. Auto-download from GitHub releases.
   local downloaded_path = M.download()
   if downloaded_path then
     return downloaded_path
@@ -295,6 +386,11 @@ end
 
 --- The upgrade action owning an install source, for user-facing notices.
 --- nil for dev builds — a local build is never "behind" a release.
+---
+--- The cargo hint MUST carry --git: `basilisk-cli` is not published to
+--- crates.io, so the bare `cargo install basilisk-cli` fails for everyone with
+--- "could not find basilisk-cli in registry" ([NVIM-BINARY-UPGRADE-SOURCES],
+--- issue #370).
 ---@param source BasiliskInstallSource
 ---@return string?
 function M.upgrade_hint(source)
@@ -303,7 +399,7 @@ function M.upgrade_hint(source)
     manual = "run :BasiliskUpdate to install",
     homebrew = "run `brew upgrade basilisk`",
     scoop = "run `scoop update basilisk`",
-    cargo = "run `cargo install basilisk-cli`",
+    cargo = "run `cargo install --git " .. GITHUB_URL .. " basilisk-cli`",
   }
   return hints[source]
 end

@@ -4,11 +4,21 @@
 
 First-class Neovim plugin for Basilisk — zero-config Python type checking, debugging, profiling, and test exploration.
 
-Basilisk is the only Python type checker scoring 100% on the [official `python/typing` conformance suite](https://github.com/python/typing/blob/main/conformance/results/results.html) — and the fastest we've measured. A complete, open-source Python dev environment in Rust: type checker, language server, debugger, profiler, plus VS Code, Cursor, Zed & Neovim extensions. Strict by default.
+Basilisk is an open-source Python type checker and language server built in Rust: diagnostics, autocomplete, refactoring, debugging, and profiling, with strictness configured per rule.
 
 <p align="center">
   <img src="https://raw.githubusercontent.com/Nimblesite/Basilisk/main/website/src/assets/images/screenshot.png" alt="Basilisk in action — type checking, diagnostics, and refactoring in the editor" width="900">
 </p>
+
+> ## ⚠️ Do not use Basilisk's type checker in your pipeline
+>
+> **The type checker still contains code that isn't doing real type checking, and it is not yet trustworthy.** Some rules decide from the way code is *spelled* rather than what it means, so they can be wrong in both directions — a false error on correct code, or silence where there is a genuine bug. Don't gate CI on it, and don't read a clean run as a clean codebase. Our former conformance claim and our benchmark figures are withdrawn, and Basilisk was [removed from the official results](https://github.com/python/typing/blob/main/conformance/results/results.html) at our request.
+>
+> **This was a mistake and a failure to verify — not an attempt to game the suite.** Nothing was concealed from `python/typing`; the submission ran the suite's own unmodified harness, and we published on a green run without ever checking whether our rules survived a semantics-preserving change. Basilisk's author has published a [personal account and apology](https://www.christianfindlay.com/blog/basilisk-conformance-apology).
+>
+> **We are auditing every rule and deleting the ones that don't hold up** — not rewriting them, not patching them, with a failing test left behind so the gap stays visible. Where a rule can't be made reliable in a straightforward way, we will depend on a different, established type checker rather than ship our own unreliable version of it.
+>
+> **Basilisk is much more than a type checker.** The language server, refactoring, formatting, debugging, and profiling don't rest on the rules under audit — those are what we are sharpening while it runs, removing anything that could hand you a misleading result. We are doing this to restore trust and turn Basilisk back into a tool you can believe. [Read the correction](https://www.basilisk-python.dev/docs/conformance/).
 
 ## Role in Basilisk
 
@@ -107,8 +117,11 @@ brew tap Nimblesite/tap && brew install basilisk
 scoop bucket add nimblesite https://github.com/Nimblesite/scoop-bucket
 scoop install basilisk
 
-# anywhere with a Rust toolchain
-cargo install basilisk-cli
+# anywhere with a Python toolchain
+uv tool install basilisk-python
+
+# anywhere with a Rust toolchain (builds from source)
+cargo install --git https://github.com/Nimblesite/Basilisk basilisk-cli
 ```
 
 That's it — diagnostics, hover, completions, formatting, debugging, tests, and profiling all run through this one plugin. Verify with `:checkhealth basilisk`.
@@ -116,7 +129,7 @@ That's it — diagnostics, hover, completions, formatting, debugging, tests, and
 ## Updating
 
 - **Plugin**: update like any other plugin — `:Lazy update` (lazy.nvim), `:PackerSync` (packer), `:PlugUpdate` (vim-plug).
-- **Binary**: when a new release is out, the plugin notifies you on startup. Run **`:BasiliskUpdate`** — it confirms, downloads the new version, and restarts the LSP in place. Installs owned by a package manager are never overwritten; the notice tells you to run `brew upgrade basilisk` / `scoop update basilisk` / `cargo install basilisk-cli` instead.
+- **Binary**: when a new release is out, the plugin notifies you on startup. Run **`:BasiliskUpdate`** — it confirms, downloads the new version, and restarts the LSP in place. Installs owned by a package manager are never overwritten; the notice tells you to run `brew upgrade basilisk` / `scoop update basilisk` / `cargo install --git https://github.com/Nimblesite/Basilisk basilisk-cli` instead.
 
 ## Configuration
 
